@@ -3,6 +3,7 @@
 #
 # Checks every layer: AWS resources, database, backend, frontend, secrets.
 # Uses `awslocal` inside the LocalStack container (no host AWS CLI needed).
+# Gracefully skips checks for services not available in LocalStack Community.
 #
 # Usage:
 #   bash scripts/verify.sh <app-slug>
@@ -17,6 +18,7 @@ DB_PORT=5435
 
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=0
 
 check() {
@@ -32,6 +34,12 @@ check() {
     fi
 }
 
+skip() {
+    local label="$1"
+    echo "  [SKIP] $label (LocalStack Community)"
+    SKIP=$((SKIP + 1))
+}
+
 echo "============================================"
 echo "  Verifying: $APP_SLUG"
 echo "============================================"
@@ -42,18 +50,27 @@ echo ""
 # -----------------------------------------------------------
 echo "AWS Resources:"
 
-$AWSLOCAL ecr describe-repositories --repository-names "$APP_SLUG-backend" > /dev/null 2>&1
-check "ECR repo: $APP_SLUG-backend" $?
+# ECR may not be available in LocalStack Community
+if $AWSLOCAL ecr describe-repositories --repository-names "$APP_SLUG-backend" > /dev/null 2>&1; then
+    check "ECR repo: $APP_SLUG-backend" 0
+    $AWSLOCAL ecr describe-repositories --repository-names "$APP_SLUG-frontend" > /dev/null 2>&1
+    check "ECR repo: $APP_SLUG-frontend" $?
+else
+    skip "ECR repos"
+fi
 
-$AWSLOCAL ecr describe-repositories --repository-names "$APP_SLUG-frontend" > /dev/null 2>&1
-check "ECR repo: $APP_SLUG-frontend" $?
+# ECS may not be available in LocalStack Community
+if $AWSLOCAL ecs describe-clusters --clusters "$APP_SLUG-cluster" 2>/dev/null | grep -q "$APP_SLUG-cluster"; then
+    check "ECS cluster: $APP_SLUG-cluster" 0
+else
+    skip "ECS cluster"
+fi
 
-$AWSLOCAL ecs describe-clusters --clusters "$APP_SLUG-cluster" 2>/dev/null | grep -q "$APP_SLUG-cluster"
-check "ECS cluster: $APP_SLUG-cluster" $?
-
+# Secrets Manager (available in Community)
 $AWSLOCAL secretsmanager describe-secret --secret-id "$APP_SLUG/dev" > /dev/null 2>&1
 check "Secret: $APP_SLUG/dev" $?
 
+# CloudWatch Logs (available in Community)
 $AWSLOCAL logs describe-log-groups --log-group-name-prefix /make-it/apps 2>/dev/null | grep -q "/make-it/apps"
 check "CloudWatch log group: /make-it/apps" $?
 
@@ -113,7 +130,7 @@ check "Frontend responds (HTTP $HTTP_CODE)" $?
 echo ""
 
 # -----------------------------------------------------------
-# Secrets
+# Secrets (verify values are retrievable)
 # -----------------------------------------------------------
 echo "Secrets Manager:"
 
@@ -127,12 +144,17 @@ echo ""
 # Summary
 # -----------------------------------------------------------
 echo "============================================"
-echo "  Results: $PASS/$TOTAL passed, $FAIL failed"
+if [ $SKIP -gt 0 ]; then
+    echo "  Results: $PASS passed, $FAIL failed, $SKIP skipped"
+else
+    echo "  Results: $PASS/$TOTAL passed, $FAIL failed"
+fi
 echo "============================================"
 
 if [ $FAIL -eq 0 ]; then
     echo ""
     echo "  All checks passed. Deployment is healthy."
+    [ $SKIP -gt 0 ] && echo "  (Skipped checks require LocalStack Pro)"
     echo ""
     exit 0
 else

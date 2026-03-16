@@ -42,10 +42,12 @@ echo ""
 # Step 1: Create ECR repositories
 # -----------------------------------------------------------
 echo "[1/7] Creating ECR repositories..."
-for repo in "$APP_SLUG-backend" "$APP_SLUG-frontend"; do
-    $AWSLOCAL ecr create-repository --repository-name "$repo" 2>/dev/null || true
-done
-echo "  ECR repos: $APP_SLUG-backend, $APP_SLUG-frontend"
+if $AWSLOCAL ecr create-repository --repository-name "$APP_SLUG-backend" > /dev/null 2>&1; then
+    $AWSLOCAL ecr create-repository --repository-name "$APP_SLUG-frontend" > /dev/null 2>&1 || true
+    echo "  ECR repos: $APP_SLUG-backend, $APP_SLUG-frontend"
+else
+    echo "  ECR not available in LocalStack Community -- skipping."
+fi
 
 # -----------------------------------------------------------
 # Step 2: Build Docker images
@@ -109,13 +111,19 @@ echo "  Secret: $APP_SLUG/dev"
 echo ""
 echo "[5/7] Creating ECS cluster and task definition..."
 
-$AWSLOCAL ecs create-cluster --cluster-name "$APP_SLUG-cluster" > /dev/null 2>&1 || true
-
-TASK_DEF="{\"family\":\"$APP_SLUG-backend\",\"networkMode\":\"awsvpc\",\"requiresCompatibilities\":[\"FARGATE\"],\"cpu\":\"512\",\"memory\":\"1024\",\"executionRoleArn\":\"arn:aws:iam::${AWS_ACCOUNT}:role/ecsTaskExecutionRole\",\"containerDefinitions\":[{\"name\":\"$APP_SLUG-backend\",\"image\":\"$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.localhost.localstack.cloud:4566/$APP_SLUG-backend:latest\",\"portMappings\":[{\"containerPort\":8000,\"protocol\":\"tcp\"}],\"environment\":[{\"name\":\"DATABASE_URL\",\"value\":\"postgresql+asyncpg://deploy_test:${DB_PASSWORD}@host.docker.internal:${DB_PORT}/deploy_test\"},{\"name\":\"JWT_SECRET\",\"value\":\"$JWT_SECRET\"}],\"logConfiguration\":{\"logDriver\":\"awslogs\",\"options\":{\"awslogs-group\":\"/make-it/apps\",\"awslogs-region\":\"$AWS_REGION\",\"awslogs-stream-prefix\":\"$APP_SLUG-backend\"}},\"healthCheck\":{\"command\":[\"CMD-SHELL\",\"python3 -c \\\"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\\\"\"],\"interval\":30,\"timeout\":5,\"retries\":3,\"startPeriod\":60}}]}"
-
-$AWSLOCAL ecs register-task-definition --cli-input-json "$TASK_DEF" > /dev/null
-echo "  Cluster: $APP_SLUG-cluster"
-echo "  Task:    $APP_SLUG-backend (Fargate 0.5 vCPU, 1 GB)"
+# ECS cluster + task definition registration.
+# LocalStack Community may not support ECS -- that's OK. The cluster/task
+# definitions are for pipeline realism. The actual containers run via Docker
+# in step 7 (simulating what Fargate would do in production).
+if $AWSLOCAL ecs create-cluster --cluster-name "$APP_SLUG-cluster" > /dev/null 2>&1; then
+    TASK_DEF="{\"family\":\"$APP_SLUG-backend\",\"networkMode\":\"awsvpc\",\"requiresCompatibilities\":[\"FARGATE\"],\"cpu\":\"512\",\"memory\":\"1024\",\"executionRoleArn\":\"arn:aws:iam::${AWS_ACCOUNT}:role/ecsTaskExecutionRole\",\"containerDefinitions\":[{\"name\":\"$APP_SLUG-backend\",\"image\":\"$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.localhost.localstack.cloud:4566/$APP_SLUG-backend:latest\",\"portMappings\":[{\"containerPort\":8000,\"protocol\":\"tcp\"}],\"environment\":[{\"name\":\"DATABASE_URL\",\"value\":\"postgresql+asyncpg://deploy_test:${DB_PASSWORD}@host.docker.internal:${DB_PORT}/deploy_test\"},{\"name\":\"JWT_SECRET\",\"value\":\"$JWT_SECRET\"}],\"logConfiguration\":{\"logDriver\":\"awslogs\",\"options\":{\"awslogs-group\":\"/make-it/apps\",\"awslogs-region\":\"$AWS_REGION\",\"awslogs-stream-prefix\":\"$APP_SLUG-backend\"}},\"healthCheck\":{\"command\":[\"CMD-SHELL\",\"python3 -c \\\"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\\\"\"],\"interval\":30,\"timeout\":5,\"retries\":3,\"startPeriod\":60}}]}"
+    $AWSLOCAL ecs register-task-definition --cli-input-json "$TASK_DEF" > /dev/null 2>&1 || true
+    echo "  Cluster: $APP_SLUG-cluster"
+    echo "  Task:    $APP_SLUG-backend (Fargate 0.5 vCPU, 1 GB)"
+else
+    echo "  ECS not available in LocalStack Community -- skipping."
+    echo "  (Containers will run directly via Docker in step 7)"
+fi
 
 # -----------------------------------------------------------
 # Step 6: Run database migrations

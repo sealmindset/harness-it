@@ -1,0 +1,205 @@
+# deploy-localstack.yml -- Prove end-to-end deployment in CI
+#
+# Validates the ENTIRE deployment pipeline in isolation:
+#   1. Start LocalStack + PostgreSQL
+#   2. Bootstrap AWS resources
+#   3. Build app Docker images
+#   4. Terraform plan + apply
+#   5. Run migrations
+#   6. Start app containers
+#   7. Verify health + API
+#   8. Teardown
+#
+# Runs on: PRs touching ship-it/**, or manually via workflow_dispatch.
+# No real AWS credentials needed -- everything runs against LocalStack.
+
+name: Deploy Pipeline (LocalStack)
+
+on:
+  pull_request:
+    paths:
+      - "ship-it/**"
+      - ".claude/make-it/scaffolds/**"
+  workflow_dispatch:
+    inputs:
+      app_slug:
+        description: "App slug to deploy (default: smoke-test)"
+        required: false
+        default: "smoke-test"
+
+jobs:
+  deploy-test:
+    name: End-to-end deployment test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      APP_SLUG: ${{ github.event.inputs.app_slug || 'smoke-test' }}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7"
+
+      # -----------------------------------------------------------
+      # Start infrastructure
+      # -----------------------------------------------------------
+      - name: Start LocalStack + PostgreSQL
+        working-directory: ship-it/localstack
+        run: docker compose up -d
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for LocalStack..."
+          timeout 60 bash -c 'until curl -sf http://localhost:4566/_localstack/health > /dev/null; do sleep 2; done'
+          echo "Waiting for PostgreSQL..."
+          timeout 30 bash -c 'until docker exec localstack-postgres-1 pg_isready -U deploy_test 2>/dev/null; do sleep 2; done'
+          echo "Infrastructure ready."
+
+      - name: Bootstrap AWS resources
+        working-directory: ship-it/localstack
+        run: bash bootstrap/init-aws.sh
+
+      # -----------------------------------------------------------
+      # Prepare test app (copy scaffold, replace placeholders)
+      # -----------------------------------------------------------
+      - name: Prepare smoke-test app from scaffold
+        run: |
+          mkdir -p /tmp/smoke-test
+          cp -r .claude/make-it/scaffolds/fastapi-nextjs/* /tmp/smoke-test/
+          cp .claude/make-it/scaffolds/fastapi-nextjs/.gitignore /tmp/smoke-test/
+          cp .claude/make-it/scaffolds/fastapi-nextjs/.env.example /tmp/smoke-test/
+
+          # Replace placeholders
+          find /tmp/smoke-test -type f -not -path '*/node_modules/*' -exec sed -i \
+            -e 's/\[APP_NAME\]/SmokeTest/g' \
+            -e 's/\[APP_SLUG\]/smoke-test/g' \
+            -e 's/\[APP_DESCRIPTION\]/Deployment pipeline smoke test/g' \
+            -e 's/\[APP_TAGLINE\]/Testing the pipeline/g' \
+            -e 's/\[APP_ICON\]/S/g' \
+            -e 's/\[FRONTEND_PORT\]/3000/g' \
+            -e 's/\[BACKEND_PORT\]/8000/g' \
+            -e 's/\[DB_PORT\]/5435/g' \
+            -e 's/\[MOCK_OIDC_PORT\]/10090/g' \
+            -e 's/\[MOCK_JIRA_PORT\]/8443/g' \
+            -e 's/\[ADDITIONAL_SERVICE_ENVS\]//g' \
+            -e 's/\[ADDITIONAL_MOCK_SERVICES\]//g' \
+            -e 's/\[ADDITIONAL_MOCK_SEED\]//g' \
+            -e 's/\[ADDITIONAL_SERVICE_URLS\]//g' \
+            {} +
+
+          # Create .env
+          cp /tmp/smoke-test/.env.example /tmp/smoke-test/.env
+          JWT_SECRET=$(openssl rand -hex 32)
+          sed -i "s/^JWT_SECRET=$/JWT_SECRET=$JWT_SECRET/" /tmp/smoke-test/.env
+          sed -i "s/^OIDC_CLIENT_ID=$/OIDC_CLIENT_ID=smoke-test/" /tmp/smoke-test/.env
+          sed -i "s/^OIDC_CLIENT_SECRET=$/OIDC_CLIENT_SECRET=smoke-secret/" /tmp/smoke-test/.env
+
+      # -----------------------------------------------------------
+      # Terraform
+      # -----------------------------------------------------------
+      - name: Terraform init
+        working-directory: ship-it/localstack/terraform
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        working-directory: ship-it/localstack/terraform
+        run: terraform plan -var="app_slug=smoke-test" -out=tfplan
+
+      - name: Terraform apply
+        working-directory: ship-it/localstack/terraform
+        run: terraform apply -auto-approve tfplan
+
+      # -----------------------------------------------------------
+      # Build and deploy
+      # -----------------------------------------------------------
+      - name: Build Docker images
+        run: |
+          echo "Building backend..."
+          docker build -t smoke-test-backend:latest /tmp/smoke-test/backend --quiet
+          echo "Building frontend..."
+          docker build -t smoke-test-frontend:latest /tmp/smoke-test/frontend --quiet
+
+      - name: Run database migrations
+        run: |
+          docker run --rm \
+            --network host \
+            -e DATABASE_URL="postgresql+asyncpg://deploy_test:deploy_test_password@127.0.0.1:5435/deploy_test" \
+            -e JWT_SECRET="test-jwt-secret" \
+            smoke-test-backend:latest \
+            alembic upgrade head
+
+      - name: Start app containers
+        run: |
+          docker run -d \
+            --name smoke-test-backend \
+            --network host \
+            -e DATABASE_URL="postgresql+asyncpg://deploy_test:deploy_test_password@127.0.0.1:5435/deploy_test" \
+            -e JWT_SECRET="test-jwt-secret" \
+            -e OIDC_CLIENT_ID="smoke-test" \
+            -e OIDC_CLIENT_SECRET="smoke-secret" \
+            -e OIDC_ISSUER_URL="http://localhost:10090" \
+            -e FRONTEND_URL="http://localhost:3000" \
+            smoke-test-backend:latest
+
+          docker run -d \
+            --name smoke-test-frontend \
+            --network host \
+            -e BACKEND_INTERNAL_URL="http://127.0.0.1:8000" \
+            smoke-test-frontend:latest
+
+      # -----------------------------------------------------------
+      # Verify
+      # -----------------------------------------------------------
+      - name: Wait for app health
+        run: |
+          echo "Waiting for backend..."
+          timeout 60 bash -c 'until curl -sf http://127.0.0.1:8000/health > /dev/null; do sleep 2; done'
+          echo "Backend healthy."
+
+          echo "Waiting for frontend..."
+          timeout 60 bash -c 'until curl -sf -o /dev/null http://127.0.0.1:3000; do sleep 2; done'
+          echo "Frontend healthy."
+
+      - name: Verify deployment
+        run: |
+          AWSLOCAL="docker exec localstack-localstack-1 awslocal"
+
+          echo "=== Backend Health ==="
+          curl -sf http://127.0.0.1:8000/health | python3 -m json.tool
+
+          echo ""
+          echo "=== Frontend ==="
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" http://127.0.0.1:3000)
+          echo "HTTP $STATUS"
+          [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || [ "$STATUS" = "307" ]
+
+          echo ""
+          echo "=== AWS Resources ==="
+          $AWSLOCAL ecr describe-repositories --query 'repositories[].repositoryName' --output text
+          $AWSLOCAL ecs list-clusters --query 'clusterArns' --output text
+          $AWSLOCAL secretsmanager list-secrets --query 'SecretList[].Name' --output text
+
+          echo ""
+          echo "=== Terraform State ==="
+          $AWSLOCAL s3 ls s3://make-it-terraform-state/ --recursive
+
+          echo ""
+          echo "Pipeline verification PASSED."
+
+      # -----------------------------------------------------------
+      # Cleanup
+      # -----------------------------------------------------------
+      - name: Teardown
+        if: always()
+        working-directory: ship-it/localstack
+        run: |
+          docker rm -f smoke-test-backend smoke-test-frontend 2>/dev/null || true
+          docker compose down -v 2>/dev/null || true

@@ -1,0 +1,47 @@
+# ship-it LocalStack Environment
+# Simulates AWS infrastructure locally to validate the full deployment pipeline.
+#
+# Usage:
+#   docker compose up -d
+#   bash bootstrap/init-aws.sh
+#   bash scripts/deploy.sh <app-slug> <project-dir>
+#   bash scripts/verify.sh <app-slug>
+#   bash scripts/teardown.sh <app-slug>
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"           # LocalStack gateway (all AWS services)
+      - "4510-4559:4510-4559" # External service ports
+    environment:
+      - SERVICES=ecr,ecs,s3,secretsmanager,cloudwatch,iam,sts,logs
+      - DEBUG=0
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - LOCALSTACK_HOST=localhost
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "localstack-data:/var/lib/localstack"
+
+  # Real PostgreSQL -- LocalStack Community doesn't support RDS instances.
+  # In production, this is replaced by RDS. The app connects identically
+  # via DATABASE_URL; only the hostname changes.
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_USER: deploy_test
+      POSTGRES_PASSWORD: deploy_test_password
+      POSTGRES_DB: deploy_test
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "deploy_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  localstack-data:
+  postgres-data:

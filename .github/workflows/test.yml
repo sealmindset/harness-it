@@ -1,0 +1,83 @@
+# harness-it CI -- runs integration tests on push and PR
+#
+# Quick mode (no Docker/LocalStack) runs on every push.
+# Full mode (with LocalStack) runs on main branch only.
+
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quick-tests:
+    name: Config Loader + Workflow Gen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout ship-it
+        uses: actions/checkout@v4
+        with:
+          repository: sealmindset/ship-it
+          path: ../ship-it
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install ship-it dependencies
+        run: cd ../ship-it && npm ci
+
+      - name: Run config loader tests
+        run: bash tests/test-config-loader.sh
+
+      - name: Run workflow generator tests
+        run: bash tests/test-workflow-gen.sh
+
+  full-e2e:
+    name: Full Pipeline E2E
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: quick-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout ship-it
+        uses: actions/checkout@v4
+        with:
+          repository: sealmindset/ship-it
+          path: ../ship-it
+
+      - name: Checkout make-it
+        uses: actions/checkout@v4
+        with:
+          repository: sealmindset/make-it
+          path: ../make-it
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install ship-it dependencies
+        run: cd ../ship-it && npm ci
+
+      - name: Start LocalStack
+        run: |
+          cd localstack
+          docker compose up -d
+          echo "Waiting for LocalStack..."
+          timeout 60 bash -c 'until curl -sf http://localhost:4566/_localstack/health > /dev/null; do sleep 2; done'
+          bash bootstrap/init-aws.sh
+
+      - name: Run smoke test
+        run: bash tests/smoke-test-e2e.sh
+
+      - name: Run full pipeline test
+        run: bash tests/full-pipeline-e2e.sh
+
+      - name: Tear down LocalStack
+        if: always()
+        run: cd localstack && docker compose down -v

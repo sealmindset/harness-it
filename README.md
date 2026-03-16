@@ -50,10 +50,35 @@ docker compose down -v
 | **Runtime** | App starts and passes health checks | Backend `/health`, frontend HTTP 200 |
 | **Pipeline** | Full deploy script runs end-to-end | 7-step `deploy.sh` |
 
+## Integration Tests
+
+The `tests/` directory validates that ship-it's config loader and workflow generator produce correct output, and that the full make-it → ship-it pipeline works end-to-end.
+
+```bash
+# Run all tests (requires Node.js, Docker, and ship-it cloned alongside harness-it)
+bash tests/run-all.sh
+
+# Run only unit-level tests (no Docker/LocalStack needed)
+bash tests/run-all.sh quick
+```
+
+| Suite | Tests | What It Validates |
+|-------|-------|-------------------|
+| `test-config-loader.sh` | 27 | Config merge logic: empty project, auto-detection, app-context, .ship-it.yml override, AWS infra, build-verify state, 3-source merge |
+| `test-workflow-gen.sh` | 29 | Workflow output: AWS (ECR/ECS), Azure (ACR/AKS), pending (placeholder), reusable caller, YAML syntax |
+| `smoke-test-e2e.sh` | 28 | Full pipeline: copy scaffold → create app-context → config loader → .ship-it.yml gen → workflow gen → Docker build → LocalStack deploy → verify |
+
+Prerequisites: Node.js, ship-it repo cloned at `../ship-it`. Docker required for smoke test steps 7-10. LocalStack required for steps 8-10 (gracefully skipped if not running).
+
 ## Structure
 
 ```
 harness-it/
+├── tests/
+│   ├── run-all.sh                      # Test orchestrator (full or quick mode)
+│   ├── test-config-loader.sh           # Config merge logic tests (27)
+│   ├── test-workflow-gen.sh            # Workflow generator tests (29)
+│   └── smoke-test-e2e.sh              # End-to-end smoke test (28)
 ├── localstack/
 │   ├── docker-compose.yml              # LocalStack + PostgreSQL
 │   ├── bootstrap/

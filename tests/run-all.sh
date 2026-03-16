@@ -36,12 +36,14 @@ echo "╚═══════════════════════�
 run_test "Config Loader Tests" "$SCRIPT_DIR/test-config-loader.sh"
 run_test "Workflow Generator Tests" "$SCRIPT_DIR/test-workflow-gen.sh"
 
-# Full mode includes the E2E smoke test
+# Full mode includes the E2E smoke tests
 if [ "$MODE" = "full" ]; then
     run_test "End-to-End Smoke Test" "$SCRIPT_DIR/smoke-test-e2e.sh"
+    run_test "Full Pipeline E2E" "$SCRIPT_DIR/full-pipeline-e2e.sh"
 else
     echo ""
     echo "  [SKIP] End-to-End Smoke Test (quick mode)"
+    echo "  [SKIP] Full Pipeline E2E (quick mode)"
 fi
 
 echo ""
